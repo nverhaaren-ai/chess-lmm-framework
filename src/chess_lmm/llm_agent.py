@@ -144,20 +144,33 @@ _ADAPTIVE_MAX_TOKENS: dict[str, int] = {
 }
 
 
-def resolve_thinking(value: str) -> dict[str, Any] | None:
-    """Resolve a CLI thinking value to an API thinking config dict.
+@dataclass
+class ThinkingConfig:
+    """Resolved thinking configuration for the API."""
+
+    thinking: dict[str, Any] | None
+    max_tokens: int
+    effort: str | None = None
+
+
+def resolve_thinking(value: str) -> ThinkingConfig:
+    """Resolve a CLI thinking value to API parameters.
 
     Accepts: "off", "low", "medium", "high", "max", or an integer string
     (manual budget_tokens). Case-insensitive, whitespace-trimmed.
 
-    Returns None for "off", or a thinking config dict.
+    Returns a ThinkingConfig with thinking dict, max_tokens, and optional
+    effort level (placed in output_config at the API call site).
     """
     normalized = value.strip().lower()
     if normalized == "off":
-        return None
+        return ThinkingConfig(thinking=None, max_tokens=1024)
     if normalized in _ADAPTIVE_MAX_TOKENS:
-        config: dict[str, Any] = {"type": "adaptive", "effort": normalized}
-        return config
+        return ThinkingConfig(
+            thinking={"type": "adaptive"},
+            max_tokens=_ADAPTIVE_MAX_TOKENS[normalized],
+            effort=normalized,
+        )
     try:
         budget = int(value)
     except ValueError:
@@ -167,7 +180,10 @@ def resolve_thinking(value: str) -> dict[str, Any] | None:
         ) from None
     if budget < 1024:
         raise ValueError("budget_tokens must be >= 1024")
-    return {"type": "enabled", "budget_tokens": budget}
+    return ThinkingConfig(
+        thinking={"type": "enabled", "budget_tokens": budget},
+        max_tokens=budget + 1024,
+    )
 
 
 def _strip_cache_control(messages: list[dict[str, Any]]) -> None:
@@ -241,6 +257,8 @@ async def llm_turn(
     system_prompt: str | None = None,
     conversation_history: list[dict[str, Any]] | None = None,
     thinking: dict[str, Any] | None = None,
+    max_tokens: int = 1024,
+    effort: str | None = None,
     enable_cache: bool = True,
     max_history: int = 40,
 ) -> LlmTurnResult:
@@ -251,8 +269,12 @@ async def llm_turn(
     Args:
         thinking: Thinking config dict for the API, e.g.
             {"type": "enabled", "budget_tokens": N} for manual or
-            {"type": "adaptive", "effort": "high"} for adaptive.
-            None disables thinking.
+            {"type": "adaptive"} for adaptive. None disables thinking.
+        max_tokens: Maximum tokens for the API response (thinking +
+            output). Use resolve_thinking() to compute both thinking
+            and max_tokens from a CLI string.
+        effort: Effort level for output_config (e.g. "low", "medium",
+            "high", "max"). Only used with adaptive thinking.
         enable_cache: Add cache_control breakpoints to system prompt,
             tools, and history frontier for prompt caching.
         max_history: Maximum messages to keep in history. Must be >= 2.
@@ -320,16 +342,6 @@ async def llm_turn(
     if enable_cache and tools:
         tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
 
-    # Compute max_tokens based on thinking config
-    if thinking is None:
-        max_tokens = 1024
-    elif "budget_tokens" in thinking:
-        max_tokens = thinking["budget_tokens"] + 1024
-    else:
-        # Adaptive thinking — scale by effort level
-        effort = thinking.get("effort", "high")
-        max_tokens = _ADAPTIVE_MAX_TOKENS.get(effort, 16384)
-
     # 5. Call Claude with tools
     max_iterations = 5  # Safety limit for tool-use loop
     for _ in range(max_iterations):
@@ -342,6 +354,8 @@ async def llm_turn(
         }
         if thinking is not None:
             request_payload["thinking"] = thinking
+        if effort is not None:
+            request_payload["output_config"] = {"effort": effort}
 
         if llm_logger:
             llm_logger.log({"type": "api_request", "payload": request_payload})

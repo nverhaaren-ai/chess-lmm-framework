@@ -12,6 +12,7 @@ import pytest
 from chess_lmm.llm_agent import (
     CHESS_TOOLS,
     LlmTurnResult,
+    ThinkingConfig,
     _build_position_context,
     _truncate_history,
     llm_turn,
@@ -388,6 +389,7 @@ class TestThinking:
             mock_anthropic,
             "test-model",
             thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
         )
 
         assert result.game_ongoing is True
@@ -408,6 +410,7 @@ class TestThinking:
             mock_anthropic,
             "test-model",
             thinking={"type": "enabled", "budget_tokens": 10000},
+            max_tokens=11024,
         )
 
         call_kwargs = mock_anthropic.messages.create.call_args[1]
@@ -418,7 +421,7 @@ class TestThinking:
         assert call_kwargs["max_tokens"] == 11024
 
     async def test_adaptive_thinking_in_request(self, server: MockChessServer) -> None:
-        """Adaptive thinking with effort sets correct max_tokens."""
+        """Adaptive thinking sends correct payload with output_config."""
         white, black = await _setup_game(server)
 
         mock_anthropic = MagicMock()
@@ -430,17 +433,20 @@ class TestThinking:
             white,
             mock_anthropic,
             "test-model",
-            thinking={"type": "adaptive", "effort": "high"},
+            thinking={"type": "adaptive"},
+            max_tokens=16384,
+            effort="high",
         )
 
         call_kwargs = mock_anthropic.messages.create.call_args[1]
-        assert call_kwargs["thinking"] == {"type": "adaptive", "effort": "high"}
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
         assert call_kwargs["max_tokens"] == 16384
+        assert call_kwargs["output_config"] == {"effort": "high"}
 
-    async def test_adaptive_max_effort_max_tokens(
+    async def test_resolve_thinking_round_trip(
         self, server: MockChessServer
     ) -> None:
-        """Max effort gets higher max_tokens than high."""
+        """resolve_thinking() output works directly with llm_turn()."""
         white, black = await _setup_game(server)
 
         mock_anthropic = MagicMock()
@@ -448,36 +454,20 @@ class TestThinking:
             "Analysis...", "make_move", {"move": "e4"}
         )
 
+        cfg = resolve_thinking("high")
         await llm_turn(
             white,
             mock_anthropic,
             "test-model",
-            thinking={"type": "adaptive", "effort": "max"},
+            thinking=cfg.thinking,
+            max_tokens=cfg.max_tokens,
+            effort=cfg.effort,
         )
 
         call_kwargs = mock_anthropic.messages.create.call_args[1]
-        assert call_kwargs["max_tokens"] == 32768
-
-    async def test_adaptive_low_effort_max_tokens(
-        self, server: MockChessServer
-    ) -> None:
-        """Low effort gets smaller max_tokens."""
-        white, black = await _setup_game(server)
-
-        mock_anthropic = MagicMock()
-        mock_anthropic.messages.create.return_value = make_thinking_tool_response(
-            "Analysis...", "make_move", {"move": "e4"}
-        )
-
-        await llm_turn(
-            white,
-            mock_anthropic,
-            "test-model",
-            thinking={"type": "adaptive", "effort": "low"},
-        )
-
-        call_kwargs = mock_anthropic.messages.create.call_args[1]
-        assert call_kwargs["max_tokens"] == 4096
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["max_tokens"] == 16384
+        assert call_kwargs["output_config"] == {"effort": "high"}
 
     async def test_thinking_disabled_by_default(self, server: MockChessServer) -> None:
         """Without thinking, no thinking param and max_tokens=1024."""
@@ -492,6 +482,7 @@ class TestThinking:
 
         call_kwargs = mock_anthropic.messages.create.call_args[1]
         assert "thinking" not in call_kwargs
+        assert "output_config" not in call_kwargs
         assert call_kwargs["max_tokens"] == 1024
 
     async def test_thinking_blocks_preserved_in_history(
@@ -524,6 +515,7 @@ class TestThinking:
             mock_anthropic,
             "test-model",
             thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
         )
 
         assert result.game_ongoing is True
@@ -571,6 +563,7 @@ class TestThinking:
             mock_anthropic,
             "test-model",
             thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
         )
 
         assert result.game_ongoing is True
@@ -611,6 +604,7 @@ class TestThinking:
             "test-model",
             llm_logger=llm_logger,
             thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
         )
 
         log_content = (tmp_path / "llm.jsonl").read_text()
@@ -641,6 +635,7 @@ class TestThinking:
             "test-model",
             llm_logger=llm_logger,
             thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
         )
 
         assert result.game_ongoing is True
@@ -653,27 +648,38 @@ class TestResolveThinking:
     """Tests for resolve_thinking() helper."""
 
     def test_off(self) -> None:
-        assert resolve_thinking("off") is None
+        cfg = resolve_thinking("off")
+        assert cfg == ThinkingConfig(thinking=None, max_tokens=1024)
 
     def test_low(self) -> None:
-        result = resolve_thinking("low")
-        assert result == {"type": "adaptive", "effort": "low"}
+        cfg = resolve_thinking("low")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.max_tokens == 4096
+        assert cfg.effort == "low"
 
     def test_medium(self) -> None:
-        result = resolve_thinking("medium")
-        assert result == {"type": "adaptive", "effort": "medium"}
+        cfg = resolve_thinking("medium")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.max_tokens == 8192
+        assert cfg.effort == "medium"
 
     def test_high(self) -> None:
-        result = resolve_thinking("high")
-        assert result == {"type": "adaptive", "effort": "high"}
+        cfg = resolve_thinking("high")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.max_tokens == 16384
+        assert cfg.effort == "high"
 
     def test_max(self) -> None:
-        result = resolve_thinking("max")
-        assert result == {"type": "adaptive", "effort": "max"}
+        cfg = resolve_thinking("max")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.max_tokens == 32768
+        assert cfg.effort == "max"
 
     def test_integer_string(self) -> None:
-        result = resolve_thinking("10000")
-        assert result == {"type": "enabled", "budget_tokens": 10000}
+        cfg = resolve_thinking("10000")
+        assert cfg.thinking == {"type": "enabled", "budget_tokens": 10000}
+        assert cfg.max_tokens == 11024
+        assert cfg.effort is None
 
     def test_integer_string_too_small(self) -> None:
         with pytest.raises(ValueError, match="budget_tokens must be"):
@@ -684,20 +690,24 @@ class TestResolveThinking:
             resolve_thinking("turbo")
 
     def test_case_insensitive(self) -> None:
-        assert resolve_thinking("HIGH") == {"type": "adaptive", "effort": "high"}
-        assert resolve_thinking("Off") == None  # noqa: E711
-        assert resolve_thinking("LOW") == {"type": "adaptive", "effort": "low"}
+        cfg = resolve_thinking("HIGH")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.effort == "high"
+        off_cfg = resolve_thinking("Off")
+        assert off_cfg.thinking is None
 
     def test_whitespace_stripped(self) -> None:
-        assert resolve_thinking("  high  ") == {"type": "adaptive", "effort": "high"}
-        assert resolve_thinking(" 10000 ") == {
-            "type": "enabled",
-            "budget_tokens": 10000,
-        }
+        cfg = resolve_thinking("  high  ")
+        assert cfg.thinking == {"type": "adaptive"}
+        assert cfg.max_tokens == 16384
+        cfg2 = resolve_thinking(" 10000 ")
+        assert cfg2.thinking == {"type": "enabled", "budget_tokens": 10000}
+        assert cfg2.max_tokens == 11024
 
     def test_minimum_valid_budget(self) -> None:
-        result = resolve_thinking("1024")
-        assert result == {"type": "enabled", "budget_tokens": 1024}
+        cfg = resolve_thinking("1024")
+        assert cfg.thinking == {"type": "enabled", "budget_tokens": 1024}
+        assert cfg.max_tokens == 2048
 
     def test_just_below_minimum_budget(self) -> None:
         with pytest.raises(ValueError, match="budget_tokens must be"):

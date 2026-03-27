@@ -116,7 +116,7 @@ async def run_game(
     )
 
     # Resolve thinking config early so invalid values fail fast
-    thinking_config = resolve_thinking(args.thinking)
+    thinking_cfg = resolve_thinking(args.thinking)
 
     out = output_stream or sys.stdout
 
@@ -237,7 +237,9 @@ async def run_game(
                     anthropic_client,
                     args.model,
                     llm_logger=llm_interaction_logger,
-                    thinking=thinking_config,
+                    thinking=thinking_cfg.thinking,
+                    max_tokens=thinking_cfg.max_tokens,
+                    effort=thinking_cfg.effort,
                     conversation_history=conversation_history,
                     enable_cache=not args.no_cache,
                     max_history=args.max_history,
