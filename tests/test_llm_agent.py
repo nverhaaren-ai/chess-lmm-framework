@@ -1346,3 +1346,54 @@ class TestVerifyMoves:
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 2
+
+    async def test_text_only_response_during_verification(
+        self, server: MockChessServer
+    ) -> None:
+        """Claude sends text-only during verification, then confirms."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: Claude picks e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Second: Claude sends text only (no tool use)
+            make_text_response("Let me think about this more..."),
+            # Third: Claude confirms e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
+        ]
+
+        result = await llm_turn(
+            white, mock_anthropic, "test-model", verify_moves=True
+        )
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 3
+
+    async def test_revisit_previously_seen_move(
+        self, server: MockChessServer
+    ) -> None:
+        """Claude proposes A, changes to B, then goes back to A — no cap increase."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # Propose e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Change to d4
+            make_tool_use_response("make_move", {"move": "d4"}, tool_id="t2"),
+            # Back to e4 (revisit — not a new distinct move)
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
+            # Confirm e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t4"),
+        ]
+
+        result = await llm_turn(
+            white, mock_anthropic, "test-model", verify_moves=True
+        )
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 4
+        # e4 was confirmed, not d4
+        history = await white.get_history()
+        assert history["moves"][0]["white"]["san"] == "e4"

@@ -584,12 +584,13 @@ async def _run_verification_loop(
     4 distinct moves have been proposed (auto-executes the last).
     """
     max_distinct_moves = 4
+    max_verify_iterations = 10
     seen_moves: set[str] = {initial_move}
     pending_move = initial_move
     pending_preview = initial_preview
     pending_tool_use_id = initial_tool_use_id
 
-    while True:
+    for _verify_iter in range(max_verify_iterations):  # safety cap
         # Build and append verification tool_result
         prompt = _build_verification_prompt(pending_preview, pending_move)
         messages.append(
@@ -818,6 +819,17 @@ async def _run_verification_loop(
         pending_move = new_move
         pending_preview = new_preview
         pending_tool_use_id = tool_use_block.id
+
+    # Safety cap reached — auto-execute last pending move
+    logger.warning(
+        "Verification iteration cap (%d) reached, auto-executing %s",
+        max_verify_iterations,
+        pending_move,
+    )
+    exec_result = await _execute_tool(client, "make_move", {"move": pending_move})
+    result_data = exec_result.get("result", {})
+    game_over = result_data.get("server_state") == "game_over"
+    return LlmTurnResult(game_ongoing=not game_over, messages=messages)
 
 
 _NO_PARAM_TOOLS = frozenset(

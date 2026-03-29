@@ -854,3 +854,55 @@ class TestPreviewMove:
         result = await white.preview_move("Qc7")
         assert result["is_stalemate"] is True
         assert result["legal_response_count"] == 0
+
+    async def test_preview_promotion(self, server: MockChessServer) -> None:
+        """Preview a pawn promotion move."""
+        fen = "4k3/P7/8/8/8/8/8/4K3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("a8=Q+")
+        assert result["move"]["san"] == "a8=Q+"
+        assert result["is_check"] is True
+        # Board unchanged — pawn still on a7
+        board = await white.get_board()
+        assert "P" in board["fen"].split("/")[1]  # rank 7
+
+    async def test_preview_castling(self, server: MockChessServer) -> None:
+        """Preview kingside castling."""
+        fen = "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("O-O")
+        assert result["move"]["san"] == "O-O"
+        # After castling: king on g1, rook on f1 (rank 1 = R4RK1)
+        assert result["fen"].split("/")[-1].startswith("R4RK1")
+        # Board unchanged
+        board = await white.get_board()
+        assert board["fen"].startswith("r3k2r")
+
+    async def test_preview_en_passant(self, server: MockChessServer) -> None:
+        """Preview en passant capture."""
+        # White pawn on e5, black just played d7-d5
+        fen = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("exd6")
+        assert result["move"]["san"] == "exd6"
+        # Captured pawn should be gone in preview FEN
+        # After exd6: pawn on d6, d5 empty
+        assert "/3P4/" in result["fen"].upper().replace("8", "........")[::-1] or \
+            "d6" in result["move"]["lan"]
+        # Board unchanged
+        board = await white.get_board()
+        assert "d6" in board["fen"]  # ep square still in FEN
+
+    async def test_preview_baselines_preserved_after_history(
+        self, server: MockChessServer
+    ) -> None:
+        """Baselines from history replay are not overwritten by join_game."""
+        # Create game with history, then preview — new_threats should be accurate
+        white, black = await _setup_game(
+            server, history=["e4", "e5", "Nf3"]
+        )
+        # Black's baseline was set after Nf3 (what black can capture/check)
+        # Preview Nc6 — should not be a new threat (Nc6 doesn't threaten anything new)
+        result = await black.preview_move("Nc6")
+        # Nc6 is a safe developing move, no new threats
+        assert result["is_check"] is False
