@@ -143,7 +143,7 @@ class TestRunGame:
 
         # Check MCP recording log
         mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
-        mcp_markers = [json.loads(l) for l in mcp_lines if '"game_start"' in l]
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
         assert len(mcp_markers) == 1
         marker = mcp_markers[0]
         assert marker["type"] == "game_start"
@@ -155,7 +155,7 @@ class TestRunGame:
 
         # Check LLM interaction log
         llm_lines = (tmp_path / "llm_interactions.jsonl").read_text().splitlines()
-        llm_markers = [json.loads(l) for l in llm_lines if '"game_start"' in l]
+        llm_markers = [json.loads(ln) for ln in llm_lines if '"game_start"' in ln]
         assert len(llm_markers) == 1
         assert llm_markers[0]["type"] == "game_start"
         assert llm_markers[0]["model"] == "claude-sonnet-4-6"
@@ -178,7 +178,7 @@ class TestRunGame:
         )
 
         mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
-        mcp_markers = [json.loads(l) for l in mcp_lines if '"game_start"' in l]
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
         marker = mcp_markers[0]
         assert marker["thinking"] == {"type": "adaptive"}
         assert marker["effort"] == "high"
@@ -199,7 +199,7 @@ class TestRunGame:
         )
 
         mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
-        mcp_markers = [json.loads(l) for l in mcp_lines if '"game_start"' in l]
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
         marker = mcp_markers[0]
         assert "thinking" not in marker
         assert "effort" not in marker
