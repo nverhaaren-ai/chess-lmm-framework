@@ -24,6 +24,7 @@ from chess_lmm.types import (
     MessagesResult,
     MoveNotation,
     OfferDrawResult,
+    PreviewMoveResult,
     SendMessageResult,
 )
 
@@ -255,6 +256,24 @@ class TestResponseTypedDicts:
     def test_can_claim_draw(self) -> None:
         draw: CanClaimDraw = {"fifty_move": True, "repetition": False}
         assert draw["fifty_move"] is True
+
+    def test_preview_move_result(self) -> None:
+        result: PreviewMoveResult = {
+            "move": {"san": "e4", "lan": "e2e4"},
+            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "is_check": False,
+            "is_checkmate": False,
+            "is_stalemate": False,
+            "legal_responses": [
+                {"san": "e5", "lan": "e7e5"},
+                {"san": "d5", "lan": "d7d5"},
+            ],
+            "legal_response_count": 20,
+            "new_threats": [],
+        }
+        assert result["legal_response_count"] == 20
+        assert result["is_check"] is False
+        assert len(result["new_threats"]) == 0
 
     def test_mcp_error_content_minimal(self) -> None:
         content: McpErrorContent = {

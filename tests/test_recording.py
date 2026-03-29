@@ -224,6 +224,24 @@ class TestRecordingClient:
         done_entry = json.loads(lines[-1])
         assert done_entry["tool"] == "done"
 
+    async def test_records_preview_move(
+        self, setup: tuple[RecordingClient, RecordingClient, Path]
+    ) -> None:
+        white, black, log_file = setup
+        await white.create_game()
+        await white.join_game("white")
+        await black.join_game("black")
+
+        result = await white.preview_move("e4")
+
+        lines = log_file.read_text().strip().split("\n")
+        preview_entry = json.loads(lines[-1])
+        assert preview_entry["tool"] == "preview_move"
+        assert preview_entry["params"]["move"] == "e4"
+        assert preview_entry["result"]["move"]["san"] == "e4"
+        assert "fen" in preview_entry["result"]
+        assert result["move"]["san"] == "e4"
+
 
 # --- LlmInteractionLogger tests ---
 
