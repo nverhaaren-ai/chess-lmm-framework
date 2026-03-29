@@ -36,6 +36,11 @@ class TestParseArgs:
         assert args.thinking == "off"
         assert args.max_history == 40
         assert args.no_cache is False
+        assert args.verify_moves is False
+
+    def test_verify_moves(self) -> None:
+        args = parse_args(["--verify-moves"])
+        assert args.verify_moves is True
 
     def test_custom_args(self) -> None:
         args = parse_args(
@@ -204,3 +209,43 @@ class TestRunGame:
         assert "thinking" not in marker
         assert "effort" not in marker
         assert "fen" not in marker
+
+    async def test_verify_moves_wired_to_llm_turn(self, tmp_path: Path) -> None:
+        """--verify-moves causes preview_move to be called during LLM turn."""
+        args = parse_args(
+            ["--color", "black", "--verify-moves", "--log-dir", str(tmp_path)]
+        )
+
+        # LLM picks e4, then confirms e4
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            MockResponse(
+                [
+                    MockContentBlock(
+                        "tool_use", id="t1", name="make_move", input={"move": "e4"}
+                    )
+                ]
+            ),
+            MockResponse(
+                [
+                    MockContentBlock(
+                        "tool_use", id="t2", name="make_move", input={"move": "e4"}
+                    )
+                ]
+            ),
+        ]
+
+        stdin = io.StringIO("/resign\n")
+        stdout = io.StringIO()
+
+        await run_game(
+            args,
+            anthropic_client=mock_anthropic,
+            input_stream=stdin,
+            output_stream=stdout,
+        )
+
+        output = stdout.getvalue()
+        assert "Claude played: e4" in output
+        # Verification required 2 API calls (pick + confirm)
+        assert mock_anthropic.messages.create.call_count == 2
