@@ -229,7 +229,6 @@ class MockChessGame:
             # No baseline — treat everything as new
             baseline = _ThreatBaseline(captures={}, checks=set())
 
-        after = _compute_threat_baseline(board)
         threat_moves: list[tuple[str, str]] = []  # (lan, san) pairs
 
         # Walk the board's legal moves to find which are threats
@@ -471,7 +470,9 @@ class MockChessGame:
         # Transition to ongoing when both players joined
         if len(self._players) == 2:
             self._state = "ongoing"
-            self._init_threat_baselines()
+            # Only init baselines if history replay didn't already set them
+            if not self._threat_baselines:
+                self._init_threat_baselines()
             # Check for immediate terminal state or check
             self._update_game_status()
 

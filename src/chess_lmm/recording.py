@@ -200,16 +200,16 @@ class RecordingClient:
             self._client.get_messages(clear=clear),
         )
 
+    async def preview_move(self, move: str) -> PreviewMoveResult:
+        return await self._call(
+            "preview_move", {"move": move}, self._client.preview_move(move)
+        )
+
     # --- Action tools ---
 
     async def make_move(self, move: str) -> MakeMoveResult:
         return await self._call(
             "make_move", {"move": move}, self._client.make_move(move)
-        )
-
-    async def preview_move(self, move: str) -> PreviewMoveResult:
-        return await self._call(
-            "preview_move", {"move": move}, self._client.preview_move(move)
         )
 
     async def claim_draw(self) -> GameStatus:
