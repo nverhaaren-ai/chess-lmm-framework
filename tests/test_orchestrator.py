@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -124,3 +125,82 @@ class TestRunGame:
 
         output = stdout.getvalue()
         assert "Claude played: e4" in output
+
+    async def test_game_start_marker_in_logs(self, tmp_path: Path) -> None:
+        """Game-start marker appears in both MCP and LLM log files."""
+        args = parse_args(["--color", "white", "--log-dir", str(tmp_path)])
+
+        mock_anthropic = MagicMock()
+        stdin = io.StringIO("/resign\n")
+        stdout = io.StringIO()
+
+        await run_game(
+            args,
+            anthropic_client=mock_anthropic,
+            input_stream=stdin,
+            output_stream=stdout,
+        )
+
+        # Check MCP recording log
+        mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
+        assert len(mcp_markers) == 1
+        marker = mcp_markers[0]
+        assert marker["type"] == "game_start"
+        assert marker["model"] == "claude-sonnet-4-6"
+        assert marker["human_color"] == "white"
+        assert marker["llm_color"] == "black"
+        assert "game_id" in marker
+        assert "ts_ms" in marker
+
+        # Check LLM interaction log
+        llm_lines = (tmp_path / "llm_interactions.jsonl").read_text().splitlines()
+        llm_markers = [json.loads(ln) for ln in llm_lines if '"game_start"' in ln]
+        assert len(llm_markers) == 1
+        assert llm_markers[0]["type"] == "game_start"
+        assert llm_markers[0]["model"] == "claude-sonnet-4-6"
+
+    async def test_game_start_marker_includes_thinking(self, tmp_path: Path) -> None:
+        """Game-start marker includes thinking config when enabled."""
+        args = parse_args(
+            ["--color", "white", "--thinking", "high", "--log-dir", str(tmp_path)]
+        )
+
+        mock_anthropic = MagicMock()
+        stdin = io.StringIO("/resign\n")
+        stdout = io.StringIO()
+
+        await run_game(
+            args,
+            anthropic_client=mock_anthropic,
+            input_stream=stdin,
+            output_stream=stdout,
+        )
+
+        mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
+        marker = mcp_markers[0]
+        assert marker["thinking"] == {"type": "adaptive"}
+        assert marker["effort"] == "high"
+
+    async def test_game_start_marker_no_thinking(self, tmp_path: Path) -> None:
+        """Game-start marker omits thinking fields when disabled."""
+        args = parse_args(["--color", "white", "--log-dir", str(tmp_path)])
+
+        mock_anthropic = MagicMock()
+        stdin = io.StringIO("/resign\n")
+        stdout = io.StringIO()
+
+        await run_game(
+            args,
+            anthropic_client=mock_anthropic,
+            input_stream=stdin,
+            output_stream=stdout,
+        )
+
+        mcp_lines = (tmp_path / "mcp_recording.jsonl").read_text().splitlines()
+        mcp_markers = [json.loads(ln) for ln in mcp_lines if '"game_start"' in ln]
+        marker = mcp_markers[0]
+        assert "thinking" not in marker
+        assert "effort" not in marker
+        assert "fen" not in marker

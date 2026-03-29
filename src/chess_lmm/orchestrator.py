@@ -116,7 +116,7 @@ async def run_game(
     )
 
     # Resolve thinking config early so invalid values fail fast
-    thinking_config = resolve_thinking(args.thinking)
+    thinking_cfg = resolve_thinking(args.thinking)
 
     out = output_stream or sys.stdout
 
@@ -165,6 +165,23 @@ async def run_game(
             human_color = random.choice(["white", "black"])
 
         llm_color = "black" if human_color == "white" else "white"
+
+        # Write game-start markers to both log files
+        game_start_info: dict[str, Any] = {
+            "type": "game_start",
+            "game_id": create_result["game_id"],
+            "model": args.model,
+            "human_color": human_color,
+            "llm_color": llm_color,
+        }
+        if args.fen:
+            game_start_info["fen"] = args.fen
+        if thinking_cfg.thinking:
+            game_start_info["thinking"] = thinking_cfg.thinking
+        if thinking_cfg.effort:
+            game_start_info["effort"] = thinking_cfg.effort
+        human_recorder.write_marker(game_start_info)
+        llm_interaction_logger.log(dict(game_start_info))
 
         # Join game
         await human_client.join_game(human_color)
@@ -237,7 +254,9 @@ async def run_game(
                     anthropic_client,
                     args.model,
                     llm_logger=llm_interaction_logger,
-                    thinking=thinking_config,
+                    thinking=thinking_cfg.thinking,
+                    max_tokens=thinking_cfg.max_tokens,
+                    effort=thinking_cfg.effort,
                     conversation_history=conversation_history,
                     enable_cache=not args.no_cache,
                     max_history=args.max_history,
