@@ -895,9 +895,7 @@ class TestPreviewMove:
         self, server: MockChessServer
     ) -> None:
         """Baselines from history replay are not overwritten by join_game."""
-        white, black = await _setup_game(
-            server, history=["e4", "e5", "Nf3"]
-        )
+        white, black = await _setup_game(server, history=["e4", "e5", "Nf3"])
         # Preview Nc6 — safe developing move, no new threats
         result = await black.preview_move("Nc6")
         assert result["is_check"] is False
