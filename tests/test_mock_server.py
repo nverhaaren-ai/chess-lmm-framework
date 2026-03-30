@@ -887,8 +887,10 @@ class TestPreviewMove:
         assert result["move"]["san"] == "exd6"
         # Captured pawn should be gone in preview FEN
         # After exd6: pawn on d6, d5 empty
-        assert "/3P4/" in result["fen"].upper().replace("8", "........")[::-1] or \
-            "d6" in result["move"]["lan"]
+        assert (
+            "/3P4/" in result["fen"].upper().replace("8", "........")[::-1]
+            or "d6" in result["move"]["lan"]
+        )
         # Board unchanged
         board = await white.get_board()
         assert "d6" in board["fen"]  # ep square still in FEN
@@ -898,9 +900,7 @@ class TestPreviewMove:
     ) -> None:
         """Baselines from history replay are not overwritten by join_game."""
         # Create game with history, then preview — new_threats should be accurate
-        white, black = await _setup_game(
-            server, history=["e4", "e5", "Nf3"]
-        )
+        white, black = await _setup_game(server, history=["e4", "e5", "Nf3"])
         # Black's baseline was set after Nf3 (what black can capture/check)
         # Preview Nc6 — should not be a new threat (Nc6 doesn't threaten anything new)
         result = await black.preview_move("Nc6")

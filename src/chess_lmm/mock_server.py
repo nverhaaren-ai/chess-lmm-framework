@@ -255,16 +255,16 @@ class MockChessGame:
                 is_threat = True
 
             if is_threat:
-                threat_moves.append((
-                    _move_to_lan(board, move),
-                    _move_to_san(board, move),
-                ))
+                threat_moves.append(
+                    (
+                        _move_to_lan(board, move),
+                        _move_to_san(board, move),
+                    )
+                )
 
         # Sort by LAN and deduplicate
         threat_moves.sort(key=lambda pair: pair[0])
-        return [
-            MoveNotation(san=san, lan=lan) for lan, san in threat_moves
-        ]
+        return [MoveNotation(san=san, lan=lan) for lan, san in threat_moves]
 
     def _update_game_status(self) -> None:
         """Update game status after a move, checking for terminal conditions."""
@@ -673,12 +673,10 @@ class MockChessGame:
         is_check = copy.is_check()
         outcome = copy.outcome(claim_draw=False)
         is_checkmate = (
-            outcome is not None
-            and outcome.termination == chess.Termination.CHECKMATE
+            outcome is not None and outcome.termination == chess.Termination.CHECKMATE
         )
         is_stalemate = (
-            outcome is not None
-            and outcome.termination == chess.Termination.STALEMATE
+            outcome is not None and outcome.termination == chess.Termination.STALEMATE
         )
 
         # Legal responses sorted by LAN

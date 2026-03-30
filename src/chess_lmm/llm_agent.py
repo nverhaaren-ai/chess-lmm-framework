@@ -630,9 +630,7 @@ async def _run_verification_loop(
                 }
             )
             game_over = result_data.get("server_state") == "game_over"
-            return LlmTurnResult(
-                game_ongoing=not game_over, messages=messages
-            )
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
 
         # Call Claude for confirmation
         request_payload: dict[str, Any] = {
@@ -706,9 +704,7 @@ async def _run_verification_loop(
                                 "type": "tool_result",
                                 "tool_use_id": tool_use_block.id,
                                 "is_error": True,
-                                "content": json.dumps(
-                                    exec_result.get("error", {})
-                                ),
+                                "content": json.dumps(exec_result.get("error", {})),
                             }
                         ],
                     }
@@ -728,14 +724,10 @@ async def _run_verification_loop(
                 }
             )
             game_over = result_data.get("server_state") == "game_over"
-            return LlmTurnResult(
-                game_ongoing=not game_over, messages=messages
-            )
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
 
         # make_move — check if confirmation or change
-        validation_error = _validate_tool_input(
-            "make_move", tool_use_block.input
-        )
+        validation_error = _validate_tool_input("make_move", tool_use_block.input)
         if validation_error is not None:
             messages.append(
                 {
@@ -745,9 +737,7 @@ async def _run_verification_loop(
                             "type": "tool_result",
                             "tool_use_id": tool_use_block.id,
                             "is_error": True,
-                            "content": json.dumps(
-                                validation_error.get("error", {})
-                            ),
+                            "content": json.dumps(validation_error.get("error", {})),
                         }
                     ],
                 }
@@ -758,9 +748,7 @@ async def _run_verification_loop(
 
         if new_move == pending_move:
             # Confirmed — execute the move
-            exec_result = await _execute_tool(
-                client, "make_move", {"move": new_move}
-            )
+            exec_result = await _execute_tool(client, "make_move", {"move": new_move})
             if exec_result.get("is_error"):
                 messages.append(
                     {
@@ -770,9 +758,7 @@ async def _run_verification_loop(
                                 "type": "tool_result",
                                 "tool_use_id": tool_use_block.id,
                                 "is_error": True,
-                                "content": json.dumps(
-                                    exec_result.get("error", {})
-                                ),
+                                "content": json.dumps(exec_result.get("error", {})),
                             }
                         ],
                     }
@@ -792,9 +778,7 @@ async def _run_verification_loop(
                 }
             )
             game_over = result_data.get("server_state") == "game_over"
-            return LlmTurnResult(
-                game_ongoing=not game_over, messages=messages
-            )
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
 
         # Different move — preview it
         try:

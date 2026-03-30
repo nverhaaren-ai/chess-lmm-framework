@@ -1193,9 +1193,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "e4"}, tool_id="t2"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 2
@@ -1216,9 +1214,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "d4"}, tool_id="t3"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 3
@@ -1238,9 +1234,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "c4"}, tool_id="t4"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 4
@@ -1260,9 +1254,7 @@ class TestVerifyMoves:
             make_tool_use_response("resign", {}, tool_id="t2"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is False
         assert mock_anthropic.messages.create.call_count == 2
@@ -1279,9 +1271,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "e4"}, tool_id="t2"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         # Should have more messages than a non-verify turn:
         # position context, assistant (t1), preview tool_result,
@@ -1312,9 +1302,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 3
@@ -1363,16 +1351,12 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 3
 
-    async def test_revisit_previously_seen_move(
-        self, server: MockChessServer
-    ) -> None:
+    async def test_revisit_previously_seen_move(self, server: MockChessServer) -> None:
         """Claude proposes A, changes to B, then goes back to A — no cap increase."""
         white, black = await _setup_game(server)
 
@@ -1388,9 +1372,7 @@ class TestVerifyMoves:
             make_tool_use_response("make_move", {"move": "e4"}, tool_id="t4"),
         ]
 
-        result = await llm_turn(
-            white, mock_anthropic, "test-model", verify_moves=True
-        )
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
 
         assert result.game_ongoing is True
         assert mock_anthropic.messages.create.call_count == 4
