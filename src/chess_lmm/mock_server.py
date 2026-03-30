@@ -34,6 +34,7 @@ from chess_lmm.types import (
     MessagesResult,
     MoveNotation,
     OfferDrawResult,
+    PreviewMoveResult,
     ResultValue,
     SendMessageResult,
     ServerState,
@@ -80,6 +81,46 @@ def _color_name(color: chess.Color) -> Color:
     return "white" if color == chess.WHITE else "black"
 
 
+class _ThreatBaseline:
+    """Captures and checks available to a side at a point in time.
+
+    Used as the baseline for computing new_threats in preview_move.
+    """
+
+    def __init__(
+        self,
+        captures: dict[str, set[int]],
+        checks: set[str],
+    ) -> None:
+        self.captures = captures  # target_square → set of captured piece types
+        self.checks = checks  # destination squares from which check is delivered
+
+
+def _compute_threat_baseline(board: chess.Board) -> _ThreatBaseline:
+    """Compute capture and check info for the side to move."""
+    captures: dict[str, set[int]] = {}
+    checks: set[str] = set()
+
+    for move in board.legal_moves:
+        dest = chess.square_name(move.to_square)
+
+        # Capture?
+        if board.is_capture(move):
+            # For en passant, the captured piece is a pawn not on to_square
+            if board.is_en_passant(move):
+                piece_type = chess.PAWN
+            else:
+                captured = board.piece_at(move.to_square)
+                piece_type = captured.piece_type if captured else chess.PAWN
+            captures.setdefault(dest, set()).add(piece_type)
+
+        # Check?
+        if board.gives_check(move):
+            checks.add(dest)
+
+    return _ThreatBaseline(captures=captures, checks=checks)
+
+
 class _HistoryRecord:
     """Tracks a single half-move in the game history."""
 
@@ -107,6 +148,26 @@ class MockChessGame:
         self._result: ResultValue | None = None
         self._termination_reason: str | None = None
         self._done_sessions: set[str] = set()
+        # Threat baselines for new_threats in preview_move.
+        # Maps color → ThreatBaseline at the start of that color's last turn.
+        self._threat_baselines: dict[Color, _ThreatBaseline] = {}
+
+    def _snapshot_threat_baseline(self) -> None:
+        """Snapshot the threat baseline for the side currently to move."""
+        assert self.board is not None
+        color = _color_name(self.board.turn)
+        self._threat_baselines[color] = _compute_threat_baseline(self.board)
+
+    def _init_threat_baselines(self) -> None:
+        """Initialize baselines for both sides at game start."""
+        assert self.board is not None
+        # Side to move
+        self._snapshot_threat_baseline()
+        # Other side (hypothetical — flip turn to compute)
+        other_color = _color_name(not self.board.turn)
+        copy = self.board.copy()
+        copy.turn = not copy.turn
+        self._threat_baselines[other_color] = _compute_threat_baseline(copy)
 
     @property
     def server_state(self) -> ServerState:
@@ -153,6 +214,57 @@ class MockChessGame:
 
     def _opponent_color(self, color: Color) -> Color:
         return "black" if color == "white" else "white"
+
+    @staticmethod
+    def _compute_new_threats(
+        board: chess.Board,
+        baseline: _ThreatBaseline | None,
+    ) -> list[MoveNotation]:
+        """Compute new tactical threats vs baseline.
+
+        Returns moves (sorted by LAN) that are new captures, changed-target
+        captures, or new checks compared to the baseline.
+        """
+        if baseline is None:
+            # No baseline — treat everything as new
+            baseline = _ThreatBaseline(captures={}, checks=set())
+
+        threat_moves: list[tuple[str, str]] = []  # (lan, san) pairs
+
+        # Walk the board's legal moves to find which are threats
+        for move in board.legal_moves:
+            dest = chess.square_name(move.to_square)
+            is_threat = False
+
+            if board.is_capture(move):
+                if board.is_en_passant(move):
+                    piece_type = chess.PAWN
+                else:
+                    captured = board.piece_at(move.to_square)
+                    piece_type = captured.piece_type if captured else chess.PAWN
+
+                if dest not in baseline.captures:
+                    # New capture: square wasn't capturable before
+                    is_threat = True
+                elif piece_type not in baseline.captures[dest]:
+                    # Changed target: different piece type on same square
+                    is_threat = True
+
+            if board.gives_check(move) and dest not in baseline.checks:
+                # New check from a square that couldn't deliver check before
+                is_threat = True
+
+            if is_threat:
+                threat_moves.append(
+                    (
+                        _move_to_lan(board, move),
+                        _move_to_san(board, move),
+                    )
+                )
+
+        # Sort by LAN and deduplicate
+        threat_moves.sort(key=lambda pair: pair[0])
+        return [MoveNotation(san=san, lan=lan) for lan, san in threat_moves]
 
     def _update_game_status(self) -> None:
         """Update game status after a move, checking for terminal conditions."""
@@ -285,7 +397,7 @@ class MockChessGame:
 
         self.initial_fullmove = board.fullmove_number
 
-        # Replay history if provided
+        # Replay history if provided, updating threat baselines as we go
         if history:
             for i, move_str in enumerate(history):
                 parsed = _parse_move(board, move_str)
@@ -295,6 +407,9 @@ class MockChessGame:
                         f"Move {i + 1} ('{move_str}') is illegal in position.",
                     )
                 board.push(parsed)
+                # Snapshot baseline for the side now to move
+                color = _color_name(board.turn)
+                self._threat_baselines[color] = _compute_threat_baseline(board)
 
         self.board = board
         self.game_id = str(uuid.uuid4())
@@ -355,6 +470,9 @@ class MockChessGame:
         # Transition to ongoing when both players joined
         if len(self._players) == 2:
             self._state = "ongoing"
+            # Only init baselines if history replay didn't already set them
+            if not self._threat_baselines:
+                self._init_threat_baselines()
             # Check for immediate terminal state or check
             self._update_game_status()
 
@@ -509,6 +627,84 @@ class MockChessGame:
         self._require_joined(session_id)
         return MessagesResult(messages=[])
 
+    def preview_move(self, session_id: str, move: str) -> PreviewMoveResult:
+        """Preview a move without applying it. Read-only, turn-gated."""
+        self._require_state("ongoing")
+        self._require_turn(session_id)
+        assert self.board is not None
+
+        # Check pending draw offer (same as make_move)
+        color = self._session_colors[session_id]
+        opponent = self._opponent_color(color)
+        if self._draw_offers.get(opponent, False):
+            raise McpError(
+                "pending_draw_offer",
+                "Opponent has a pending draw offer; must accept or decline first.",
+            )
+
+        # Parse move (same validation as make_move)
+        try:
+            parsed = _parse_move(self.board, move)
+        except _AmbiguousMoveError as e:
+            raise McpError(
+                "ambiguous_move",
+                f"Ambiguous move: '{move}' matches multiple legal moves.",
+            ) from e
+        if parsed is None:
+            if _looks_like_move(move):
+                raise McpError(
+                    "illegal_move",
+                    f"Illegal move: '{move}' is not legal in this position.",
+                )
+            raise McpError(
+                "invalid_format",
+                f"Could not parse '{move}' as SAN or LAN.",
+            )
+
+        # Record SAN/LAN before pushing (need SAN from current position)
+        san = _move_to_san(self.board, parsed)
+        lan = _move_to_lan(self.board, parsed)
+
+        # Work on a copy — do not mutate the real board
+        copy = self.board.copy()
+        copy.push(parsed)
+
+        # Compute resulting state
+        is_check = copy.is_check()
+        outcome = copy.outcome(claim_draw=False)
+        is_checkmate = (
+            outcome is not None and outcome.termination == chess.Termination.CHECKMATE
+        )
+        is_stalemate = (
+            outcome is not None and outcome.termination == chess.Termination.STALEMATE
+        )
+
+        # Legal responses sorted by LAN
+        legal_responses: list[MoveNotation] = []
+        for resp_move in sorted(copy.legal_moves, key=lambda m: m.uci()):
+            legal_responses.append(
+                MoveNotation(
+                    san=_move_to_san(copy, resp_move),
+                    lan=_move_to_lan(copy, resp_move),
+                )
+            )
+
+        # Compute new_threats by diffing against baseline
+        opponent = self._opponent_color(color)
+        baseline = self._threat_baselines.get(opponent)
+        new_threats = self._compute_new_threats(copy, baseline)
+
+        return PreviewMoveResult(
+            move=MoveNotation(san=san, lan=lan),
+            fen=copy.fen(),
+            is_check=is_check,
+            is_checkmate=is_checkmate,
+            is_stalemate=is_stalemate,
+            legal_responses=legal_responses,
+            legal_response_count=len(legal_responses),
+            new_threats=new_threats,
+        )
+
     # --- Action tools ---
 
     def make_move(self, session_id: str, move: str) -> MakeMoveResult:
@@ -558,6 +754,9 @@ class MockChessGame:
                 san=san, lan=lan, color=chess.WHITE if color == "white" else chess.BLACK
             )
         )
+
+        # Update threat baseline for the side now to move
+        self._snapshot_threat_baseline()
 
         # Withdraw any draw offer from the moving player
         self._draw_offers[color] = False
@@ -732,6 +931,9 @@ class MockSessionClient:
         clear: bool = True,
     ) -> MessagesResult:
         return self._game.get_messages(self._session_id, clear=clear)
+
+    async def preview_move(self, move: str) -> PreviewMoveResult:
+        return self._game.preview_move(self._session_id, move)
 
     # --- Action tools ---
 

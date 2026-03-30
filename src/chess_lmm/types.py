@@ -162,6 +162,22 @@ class MakeMoveResult(GameStatus):
     move_played: MoveNotation
 
 
+class PreviewMoveResult(TypedDict):
+    """Response from preview_move (Section 8.5.2).
+
+    Hypothetical position after a move, without applying it.
+    """
+
+    move: MoveNotation
+    fen: str
+    is_check: bool
+    is_checkmate: bool
+    is_stalemate: bool
+    legal_responses: list[MoveNotation]
+    legal_response_count: int
+    new_threats: list[MoveNotation]
+
+
 class OfferDrawResult(TypedDict):
     """Response from offer_draw (Section 8.5.3)."""
 

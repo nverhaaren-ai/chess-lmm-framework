@@ -31,6 +31,7 @@ from chess_lmm.types import (
     McpError,
     MessagesResult,
     OfferDrawResult,
+    PreviewMoveResult,
     SendMessageResult,
 )
 
@@ -197,6 +198,11 @@ class RecordingClient:
             "get_messages",
             {"clear": clear},
             self._client.get_messages(clear=clear),
+        )
+
+    async def preview_move(self, move: str) -> PreviewMoveResult:
+        return await self._call(
+            "preview_move", {"move": move}, self._client.preview_move(move)
         )
 
     # --- Action tools ---

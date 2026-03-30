@@ -687,3 +687,215 @@ class TestEdgeCases:
             await client.get_legal_moves()
         with pytest.raises(McpError, match="no_active_game"):
             await client.get_history()
+
+
+# --- Preview move tests ---
+
+
+class TestPreviewMove:
+    """Tests for the preview_move query tool."""
+
+    async def test_basic_preview(self, server: MockChessServer) -> None:
+        """Preview returns hypothetical position without applying move."""
+        white, black = await _setup_game(server)
+        result = await white.preview_move("e4")
+        assert result["move"]["san"] == "e4"
+        assert result["move"]["lan"] == "e2e4"
+        assert result["is_check"] is False
+        assert result["is_checkmate"] is False
+        assert result["is_stalemate"] is False
+        assert result["legal_response_count"] == 20
+        assert result["fen"] != INITIAL_FEN
+        # Moves sorted by LAN
+        lans = [m["lan"] for m in result["legal_responses"]]
+        assert lans == sorted(lans)
+
+    async def test_does_not_mutate_board(self, server: MockChessServer) -> None:
+        """Board is unchanged after preview — move can still be made."""
+        white, black = await _setup_game(server)
+        board_before = await white.get_board()
+        await white.preview_move("e4")
+        board_after = await white.get_board()
+        assert board_before["fen"] == board_after["fen"]
+        # Can still make the same move
+        result = await white.make_move("e4")
+        assert result["move_played"]["san"] == "e4"
+
+    async def test_preview_illegal_move(self, server: MockChessServer) -> None:
+        white, black = await _setup_game(server)
+        with pytest.raises(McpError) as exc_info:
+            await white.preview_move("e2e5")
+        assert exc_info.value.code == "illegal_move"
+
+    async def test_preview_invalid_format(self, server: MockChessServer) -> None:
+        white, black = await _setup_game(server)
+        with pytest.raises(McpError) as exc_info:
+            await white.preview_move("xyz")
+        assert exc_info.value.code == "invalid_format"
+
+    async def test_preview_not_your_turn(self, server: MockChessServer) -> None:
+        white, black = await _setup_game(server)
+        with pytest.raises(McpError, match="not_your_turn"):
+            await black.preview_move("e5")
+
+    async def test_preview_no_game(self, server: MockChessServer) -> None:
+        client = await server.create_session()
+        with pytest.raises(McpError, match="no_active_game"):
+            await client.preview_move("e4")
+
+    async def test_preview_pending_draw_offer(self, server: MockChessServer) -> None:
+        """Cannot preview when opponent has a pending draw offer."""
+        white, black = await _setup_game(server)
+        await white.make_move("e4")
+        await black.make_move("e5")
+        # Black offers draw (not turn-gated), now it's white's turn
+        await black.offer_draw()
+        with pytest.raises(McpError, match="pending_draw_offer"):
+            await white.preview_move("d4")
+
+    async def test_preview_check(self, server: MockChessServer) -> None:
+        """Preview detects when move gives check."""
+        white, black = await _setup_game(server)
+        await white.make_move("e4")
+        await black.make_move("f5")
+        result = await white.preview_move("Qh5")
+        assert result["is_check"] is True
+        assert result["is_checkmate"] is False
+
+    async def test_preview_checkmate(self, server: MockChessServer) -> None:
+        """Preview detects scholar's mate."""
+        white, black = await _setup_game(server)
+        for w, b in [("e4", "e5"), ("Qh5", "Nc6"), ("Bc4", "Nf6")]:
+            await white.make_move(w)
+            await black.make_move(b)
+        result = await white.preview_move("Qxf7")
+        assert result["is_checkmate"] is True
+        assert result["is_check"] is True
+        assert result["legal_response_count"] == 0
+
+    # --- new_threats tests ---
+
+    async def test_new_threat_piece_moved_into_capture(
+        self, server: MockChessServer
+    ) -> None:
+        """Piece moved to square where opponent can capture it."""
+        # White: Ke1, Nd2. Black: Ke8, Pd5.
+        # Baseline for black (hypothetical): no captures (Nd2 unreachable by Pd5).
+        # White plays Nc4: Pd5 can now capture dxc4 — new capture.
+        fen = "4k3/8/8/3p4/8/8/3N4/4K3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("Nc4")
+        threat_sans = {t["san"] for t in result["new_threats"]}
+        assert "dxc4" in threat_sans
+
+    async def test_new_threat_new_check(self, server: MockChessServer) -> None:
+        """Move that creates a new check threat for the opponent."""
+        # White: Ke1, Pf2. Black: Ke8, Qd8.
+        # Baseline: Black Qd8 has no checks available against Ke1.
+        # White plays f3?? — opens the e1-a5 diagonal partially, but more
+        # importantly opens e1-h4. Black can now play Qh4+ (check).
+        # Actually Qd8 to h4 is not on one line... Qd8 can go to h4 via d8-h4
+        # diagonal? d8, e7, f6, g5, h4 — yes, that's a diagonal!
+        # After f3: Qh4+ is check. Baseline: was Qh4+ possible before f3?
+        # Before f3: Pf2 blocks e1-h4 diagonal? Actually Qd8-h4 goes through
+        # e7,f6,g5 — the f2 pawn doesn't block that diagonal. Qh4 would be
+        # check via the h4-e1 diagonal. Before f3, is that blocked?
+        # h4 to e1: h4,g3,f2,e1. f2 has a pawn! So Qh4+ is blocked by Pf2.
+        # After f3: pawn moved from f2 to f3. h4,g3,f2(empty),e1. Now clear!
+        # So Qh4+ is a NEW check.
+        fen = "3qk3/8/8/8/8/8/5P2/4K3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("f3")
+        threat_sans = {t["san"] for t in result["new_threats"]}
+        assert "Qh4+" in threat_sans
+
+    async def test_new_threat_changed_capture_target(
+        self, server: MockChessServer
+    ) -> None:
+        """Capture on same square but different piece type is a new threat."""
+        # White: Ke1, Nc3, Pe4. Black: Ke8, Nc5, Pd5, Ne5.
+        # After Ke2 (White), it's Black's turn.
+        # Black's baseline: dxe4 captures PAWN, Nxe4 (from c5) captures PAWN.
+        # Black plays dxe4 (captures White pawn).
+        # White previews Nxe4 (knight recaptures on e4).
+        # After Nxe4: Nc5 can capture Nxe4 — now it's a KNIGHT, not a PAWN.
+        fen = "4k3/8/8/2npn3/4P3/2N5/8/4K3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen, history=["Ke2", "dxe4"])
+        result = await white.preview_move("Nxe4")
+        threat_sans = {t["san"] for t in result["new_threats"]}
+        # Nc5xe4 captures KNIGHT (was PAWN in baseline) — changed target
+        assert "Ncxe4" in threat_sans or "Nxe4" in threat_sans
+
+    async def test_no_new_threats_safe_move(self, server: MockChessServer) -> None:
+        """A safe move creates no new threats."""
+        # Standard opening: 1.e4 — no black captures or checks possible after.
+        white, black = await _setup_game(server)
+        result = await white.preview_move("e4")
+        assert result["new_threats"] == []
+
+    async def test_new_threats_sorted_by_lan(self, server: MockChessServer) -> None:
+        """new_threats list is sorted lexicographically by LAN."""
+        # White: Ke1, Qd1. Black: Ke8, Rb8, Bc8.
+        # Baseline: no captures (Qd1 not reachable by Rb8 or Bc8).
+        # White plays Qd7+: check via d7-e8 diagonal.
+        # After Qd7+: Black can capture Kxd7, Bxd7 — both new captures.
+        fen = "1rb1k3/8/8/8/8/8/8/3QK3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("Qd7")
+        assert len(result["new_threats"]) >= 2
+        threat_lans = [t["lan"] for t in result["new_threats"]]
+        assert threat_lans == sorted(threat_lans)
+
+    async def test_preview_stalemate(self, server: MockChessServer) -> None:
+        """Preview detects stalemate."""
+        # Kb6, Qc1 vs Ka8. Qc7 covers b8 while Kb6 covers a7/b7.
+        fen = "k7/8/1K6/8/8/8/8/2Q5 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("Qc7")
+        assert result["is_stalemate"] is True
+        assert result["legal_response_count"] == 0
+
+    async def test_preview_promotion(self, server: MockChessServer) -> None:
+        """Preview a pawn promotion move."""
+        fen = "4k3/P7/8/8/8/8/8/4K3 w - - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("a8=Q+")
+        assert result["move"]["san"] == "a8=Q+"
+        assert result["is_check"] is True
+        # Board unchanged — pawn still on a7
+        board = await white.get_board()
+        assert "P" in board["fen"].split("/")[1]  # rank 7
+
+    async def test_preview_castling(self, server: MockChessServer) -> None:
+        """Preview kingside castling."""
+        fen = "r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("O-O")
+        assert result["move"]["san"] == "O-O"
+        # After castling: king on g1, rook on f1 (rank 1 = R4RK1)
+        assert result["fen"].split("/")[-1].startswith("R4RK1")
+        # Board unchanged
+        board = await white.get_board()
+        assert board["fen"].startswith("r3k2r")
+
+    async def test_preview_en_passant(self, server: MockChessServer) -> None:
+        """Preview en passant capture."""
+        # White pawn on e5, black just played d7-d5
+        fen = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2"
+        white, black = await _setup_game(server, fen=fen)
+        result = await white.preview_move("exd6")
+        assert result["move"]["san"] == "exd6"
+        # Captured pawn should be gone in preview FEN
+        assert "d6" in result["move"]["lan"]
+        # Board unchanged
+        board = await white.get_board()
+        assert "d6" in board["fen"]  # ep square still in FEN
+
+    async def test_preview_baselines_preserved_after_history(
+        self, server: MockChessServer
+    ) -> None:
+        """Baselines from history replay are not overwritten by join_game."""
+        white, black = await _setup_game(server, history=["e4", "e5", "Nf3"])
+        # Preview Nc6 — safe developing move, no new threats
+        result = await black.preview_move("Nc6")
+        assert result["is_check"] is False

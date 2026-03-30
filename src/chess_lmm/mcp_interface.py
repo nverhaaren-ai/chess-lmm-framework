@@ -21,6 +21,7 @@ from chess_lmm.types import (
     MakeMoveResult,
     MessagesResult,
     OfferDrawResult,
+    PreviewMoveResult,
     SendMessageResult,
 )
 
@@ -97,6 +98,10 @@ class ChessSessionClient(Protocol):
         clear: bool = True,
     ) -> MessagesResult:
         """Return messages sent to this player."""
+        ...
+
+    async def preview_move(self, move: str) -> PreviewMoveResult:
+        """Preview a move without applying it. Turn-gated, read-only."""
         ...
 
     # --- Action tools (Section 8.5.3) ---
