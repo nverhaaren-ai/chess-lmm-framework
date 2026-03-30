@@ -83,6 +83,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Disable prompt caching",
     )
+    parser.add_argument(
+        "--verify-moves",
+        action="store_true",
+        default=False,
+        help="Enable blunder-check: preview moves and ask Claude to confirm",
+    )
 
     server_group = parser.add_mutually_exclusive_group()
     server_group.add_argument(
@@ -260,6 +266,7 @@ async def run_game(
                     conversation_history=conversation_history,
                     enable_cache=not args.no_cache,
                     max_history=args.max_history,
+                    verify_moves=args.verify_moves,
                 )
                 game_ongoing = llm_result.game_ongoing
                 conversation_history = llm_result.messages

@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from chess_lmm.mcp_interface import ChessSessionClient
-from chess_lmm.recording import LlmInteractionLogger
-from chess_lmm.types import McpError
+from chess_lmm.recording import LlmInteractionLogger, render_board
+from chess_lmm.types import McpError, PreviewMoveResult
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +261,7 @@ async def llm_turn(
     effort: str | None = None,
     enable_cache: bool = True,
     max_history: int = 40,
+    verify_moves: bool = False,
 ) -> LlmTurnResult:
     """Handle one turn for the LLM agent.
 
@@ -278,6 +279,8 @@ async def llm_turn(
         enable_cache: Add cache_control breakpoints to system prompt,
             tools, and history frontier for prompt caching.
         max_history: Maximum messages to keep in history. Must be >= 2.
+        verify_moves: When True, preview moves before executing and
+            ask Claude to confirm or change. Helps reduce blunders.
     """
     if thinking is not None:
         budget = thinking.get("budget_tokens")
@@ -409,7 +412,68 @@ async def llm_turn(
             )
             continue
 
-        # Execute tool calls
+        # Blunder-check: intercept make_move for verification
+        if (
+            verify_moves
+            and len(tool_use_blocks) == 1
+            and tool_use_blocks[0].name == "make_move"
+        ):
+            block = tool_use_blocks[0]
+            validation_error = _validate_tool_input("make_move", block.input)
+            if validation_error is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "is_error": True,
+                                "content": json.dumps(
+                                    validation_error.get("error", {})
+                                ),
+                            }
+                        ],
+                    }
+                )
+                continue
+
+            move_str = block.input["move"]
+            try:
+                preview = await client.preview_move(move_str)
+            except McpError as e:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "is_error": True,
+                                "content": json.dumps(e.to_dict()),
+                            }
+                        ],
+                    }
+                )
+                continue
+
+            return await _run_verification_loop(
+                client,
+                anthropic_client,
+                model,
+                move_str,
+                block.id,
+                preview,
+                messages,
+                system_value=system_value,
+                tools=tools,
+                thinking=thinking,
+                max_tokens=max_tokens,
+                effort=effort,
+                llm_logger=llm_logger,
+            )
+
+        # Execute tool calls (normal path)
         tool_results: list[dict[str, Any]] = []
         game_ended = False
 
@@ -450,6 +514,306 @@ async def llm_turn(
 
     logger.warning("LLM turn exceeded max iterations")
     return LlmTurnResult(game_ongoing=True, messages=messages)
+
+
+def _build_verification_prompt(
+    preview: PreviewMoveResult,
+    move_str: str,
+) -> str:
+    """Build the verification tool_result content for a previewed move."""
+    move_info = preview["move"]
+    san = move_info.get("san", move_str)
+    lan = move_info.get("lan", move_str)
+    fen = preview["fen"]
+    board_diagram = render_board(fen)
+    response_count = preview["legal_response_count"]
+
+    parts = [
+        f"MOVE PREVIEW — {san} ({lan}) has not been played yet.",
+        "",
+        f"Position after {san}:",
+        board_diagram,
+        "",
+        f"FEN: {fen}",
+        f"Opponent's legal responses: {response_count} moves",
+    ]
+
+    if preview.get("is_checkmate"):
+        parts.append("\nThis move delivers CHECKMATE!")
+    elif preview.get("is_check"):
+        parts.append("\nThis move gives check.")
+    elif preview.get("is_stalemate"):
+        parts.append("\nWARNING: This move results in STALEMATE (draw)!")
+
+    new_threats = preview.get("new_threats", [])
+    if new_threats:
+        parts.append("")
+        parts.append("⚠ New threats created by this move:")
+        for threat in new_threats:
+            threat_san = threat.get("san", threat.get("lan", "?"))
+            parts.append(f"  {threat_san}")
+
+    parts.append("")
+    parts.append(
+        f'Review the position. To confirm, call make_move("{move_str}"). '
+        "To choose a different move, call make_move with another move."
+    )
+    return "\n".join(parts)
+
+
+async def _run_verification_loop(
+    client: ChessSessionClient,
+    anthropic_client: Any,
+    model: str,
+    initial_move: str,
+    initial_tool_use_id: str,
+    initial_preview: PreviewMoveResult,
+    messages: list[dict[str, Any]],
+    *,
+    system_value: Any,
+    tools: list[dict[str, Any]],
+    thinking: dict[str, Any] | None,
+    max_tokens: int,
+    effort: str | None,
+    llm_logger: LlmInteractionLogger | None,
+) -> LlmTurnResult:
+    """Run the blunder-check verification sub-loop.
+
+    Previews the proposed move, asks Claude to confirm or change,
+    and loops until confirmed, a different action is taken, or
+    4 distinct moves have been proposed (auto-executes the last).
+    """
+    max_distinct_moves = 4
+    max_verify_iterations = 10
+    seen_moves: set[str] = {initial_move}
+    pending_move = initial_move
+    pending_preview = initial_preview
+    pending_tool_use_id = initial_tool_use_id
+
+    for _verify_iter in range(max_verify_iterations):  # safety cap
+        # Build and append verification tool_result
+        prompt = _build_verification_prompt(pending_preview, pending_move)
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": pending_tool_use_id,
+                        "content": prompt,
+                    }
+                ],
+            }
+        )
+
+        # Check if we've hit the distinct-moves cap
+        if len(seen_moves) >= max_distinct_moves:
+            logger.info(
+                "Verification cap reached (%d moves), auto-executing %s",
+                max_distinct_moves,
+                pending_move,
+            )
+            exec_result = await _execute_tool(
+                client, "make_move", {"move": pending_move}
+            )
+            result_data = exec_result.get("result", {})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": pending_tool_use_id,
+                            "content": json.dumps(result_data),
+                        }
+                    ],
+                }
+            )
+            game_over = result_data.get("server_state") == "game_over"
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
+
+        # Call Claude for confirmation
+        request_payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_value,
+            "messages": messages,
+            "tools": tools,
+        }
+        if thinking is not None:
+            request_payload["thinking"] = thinking
+        if effort is not None:
+            request_payload["output_config"] = {"effort": effort}
+
+        if llm_logger:
+            llm_logger.log({"type": "api_request", "payload": request_payload})
+
+        response = anthropic_client.messages.create(**request_payload)
+
+        if llm_logger:
+            llm_logger.log(
+                {
+                    "type": "api_response",
+                    "response": _serialize_response(response),
+                }
+            )
+
+        # Process response
+        assistant_content: list[Any] = []
+        tool_use_block = None
+
+        for block in response.content:
+            if block.type == "thinking":
+                assistant_content.append(block)
+            elif block.type == "text":
+                assistant_content.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                assistant_content.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+                tool_use_block = block
+
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if tool_use_block is None:
+            # Claude didn't call a tool — prompt again
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Please use make_move to confirm or change your move.",
+                }
+            )
+            continue
+
+        # Non-make_move tool — execute directly (resign, draw, etc.)
+        if tool_use_block.name != "make_move":
+            exec_result = await _execute_tool(
+                client, tool_use_block.name, tool_use_block.input
+            )
+            if exec_result.get("is_error"):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_block.id,
+                                "is_error": True,
+                                "content": json.dumps(exec_result.get("error", {})),
+                            }
+                        ],
+                    }
+                )
+                continue
+            result_data = exec_result.get("result", {})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "content": json.dumps(result_data),
+                        }
+                    ],
+                }
+            )
+            game_over = result_data.get("server_state") == "game_over"
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
+
+        # make_move — check if confirmation or change
+        validation_error = _validate_tool_input("make_move", tool_use_block.input)
+        if validation_error is not None:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "is_error": True,
+                            "content": json.dumps(validation_error.get("error", {})),
+                        }
+                    ],
+                }
+            )
+            continue
+
+        new_move = tool_use_block.input["move"]
+
+        if new_move == pending_move:
+            # Confirmed — execute the move
+            exec_result = await _execute_tool(client, "make_move", {"move": new_move})
+            if exec_result.get("is_error"):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_block.id,
+                                "is_error": True,
+                                "content": json.dumps(exec_result.get("error", {})),
+                            }
+                        ],
+                    }
+                )
+                continue
+            result_data = exec_result.get("result", {})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "content": json.dumps(result_data),
+                        }
+                    ],
+                }
+            )
+            game_over = result_data.get("server_state") == "game_over"
+            return LlmTurnResult(game_ongoing=not game_over, messages=messages)
+
+        # Different move — preview it
+        try:
+            new_preview = await client.preview_move(new_move)
+        except McpError as e:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "is_error": True,
+                            "content": json.dumps(e.to_dict()),
+                        }
+                    ],
+                }
+            )
+            continue
+
+        seen_moves.add(new_move)
+        pending_move = new_move
+        pending_preview = new_preview
+        pending_tool_use_id = tool_use_block.id
+
+    # Safety cap reached — auto-execute last pending move
+    logger.warning(
+        "Verification iteration cap (%d) reached, auto-executing %s",
+        max_verify_iterations,
+        pending_move,
+    )
+    exec_result = await _execute_tool(client, "make_move", {"move": pending_move})
+    result_data = exec_result.get("result", {})
+    game_over = result_data.get("server_state") == "game_over"
+    return LlmTurnResult(game_ongoing=not game_over, messages=messages)
 
 
 _NO_PARAM_TOOLS = frozenset(

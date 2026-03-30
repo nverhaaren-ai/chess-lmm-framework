@@ -1160,3 +1160,222 @@ class TestChessTools:
         make_move = next(t for t in CHESS_TOOLS if t["name"] == "make_move")
         assert "move" in make_move["input_schema"]["properties"]
         assert "move" in make_move["input_schema"]["required"]
+
+
+class TestVerifyMoves:
+    """Tests for the blunder-check verification loop."""
+
+    async def test_no_preview_when_disabled(self, server: MockChessServer) -> None:
+        """verify_moves=False: no preview_move, move executes directly."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.return_value = make_tool_use_response(
+            "make_move", {"move": "e4"}
+        )
+
+        result = await llm_turn(white, mock_anthropic, "test-model")
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 1
+        status = await white.get_status()
+        assert status["turn"] == "black"
+
+    async def test_confirm_same_move(self, server: MockChessServer) -> None:
+        """Claude picks e4, preview shown, Claude confirms e4 → move executed."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: Claude picks e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Second: Claude confirms e4 after seeing preview
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t2"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 2
+        status = await white.get_status()
+        assert status["turn"] == "black"
+
+    async def test_change_move(self, server: MockChessServer) -> None:
+        """Claude picks e4, then changes to d4, confirms d4."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: Claude picks e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Second: Claude changes to d4
+            make_tool_use_response("make_move", {"move": "d4"}, tool_id="t2"),
+            # Third: Claude confirms d4
+            make_tool_use_response("make_move", {"move": "d4"}, tool_id="t3"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 3
+        # d4 should have been played, not e4
+        history = await white.get_history()
+        assert history["moves"][0]["white"]["san"] == "d4"
+
+    async def test_four_distinct_moves_cap(self, server: MockChessServer) -> None:
+        """After 4 distinct moves, the last move is auto-executed."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            make_tool_use_response("make_move", {"move": "d4"}, tool_id="t2"),
+            make_tool_use_response("make_move", {"move": "Nf3"}, tool_id="t3"),
+            make_tool_use_response("make_move", {"move": "c4"}, tool_id="t4"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 4
+        # c4 should have been auto-executed (4th distinct move)
+        history = await white.get_history()
+        assert history["moves"][0]["white"]["san"] == "c4"
+
+    async def test_resign_during_verification(self, server: MockChessServer) -> None:
+        """Claude resigns during verification instead of confirming."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: Claude picks e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Second: Claude resigns instead
+            make_tool_use_response("resign", {}, tool_id="t2"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is False
+        assert mock_anthropic.messages.create.call_count == 2
+
+    async def test_verification_messages_in_history(
+        self, server: MockChessServer
+    ) -> None:
+        """Verification rounds appear in returned message history."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t2"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        # Should have more messages than a non-verify turn:
+        # position context, assistant (t1), preview tool_result,
+        # assistant (t2 confirm), executed tool_result
+        assert len(result.messages) >= 5
+        # Find preview content in tool_results
+        preview_found = False
+        for msg in result.messages:
+            if msg["role"] == "user" and isinstance(msg["content"], list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and "MOVE PREVIEW" in block.get(
+                        "content", ""
+                    ):
+                        preview_found = True
+        assert preview_found
+
+    async def test_illegal_move_preview_error(self, server: MockChessServer) -> None:
+        """Illegal move during verification returns error, Claude retries."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: illegal move
+            make_tool_use_response("make_move", {"move": "e2e5"}, tool_id="t1"),
+            # Second: valid move after error
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t2"),
+            # Third: confirm
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 3
+        status = await white.get_status()
+        assert status["turn"] == "black"
+
+    async def test_with_thinking_enabled(self, server: MockChessServer) -> None:
+        """Verification works with thinking blocks present."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            make_thinking_tool_response(
+                "Analyzing...", "make_move", {"move": "e4"}, tool_id="t1"
+            ),
+            make_thinking_tool_response(
+                "Confirming...", "make_move", {"move": "e4"}, tool_id="t2"
+            ),
+        ]
+
+        result = await llm_turn(
+            white,
+            mock_anthropic,
+            "test-model",
+            verify_moves=True,
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            max_tokens=3072,
+        )
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 2
+
+    async def test_text_only_response_during_verification(
+        self, server: MockChessServer
+    ) -> None:
+        """Claude sends text-only during verification, then confirms."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # First: Claude picks e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Second: Claude sends text only (no tool use)
+            make_text_response("Let me think about this more..."),
+            # Third: Claude confirms e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 3
+
+    async def test_revisit_previously_seen_move(self, server: MockChessServer) -> None:
+        """Claude proposes A, changes to B, then goes back to A — no cap increase."""
+        white, black = await _setup_game(server)
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.messages.create.side_effect = [
+            # Propose e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t1"),
+            # Change to d4
+            make_tool_use_response("make_move", {"move": "d4"}, tool_id="t2"),
+            # Back to e4 (revisit — not a new distinct move)
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t3"),
+            # Confirm e4
+            make_tool_use_response("make_move", {"move": "e4"}, tool_id="t4"),
+        ]
+
+        result = await llm_turn(white, mock_anthropic, "test-model", verify_moves=True)
+
+        assert result.game_ongoing is True
+        assert mock_anthropic.messages.create.call_count == 4
+        # e4 was confirmed, not d4
+        history = await white.get_history()
+        assert history["moves"][0]["white"]["san"] == "e4"
