@@ -1166,7 +1166,7 @@ class TestVerifyMoves:
     """Tests for the blunder-check verification loop."""
 
     async def test_no_preview_when_disabled(self, server: MockChessServer) -> None:
-        """verify_moves=False (default): no preview_move called, move executes directly."""
+        """verify_moves=False: no preview_move, move executes directly."""
         white, black = await _setup_game(server)
 
         mock_anthropic = MagicMock()
