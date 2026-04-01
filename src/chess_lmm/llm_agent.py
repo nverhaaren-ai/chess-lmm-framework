@@ -548,10 +548,14 @@ def _build_verification_prompt(
     new_threats = preview.get("new_threats", [])
     if new_threats:
         parts.append("")
-        parts.append("⚠ New threats created by this move:")
+        parts.append(
+            "⚠ WARNING — This move gives your opponent new options "
+            "that were not available before:"
+        )
         for threat in new_threats:
             threat_san = threat.get("san", threat.get("lan", "?"))
             parts.append(f"  {threat_san}")
+        parts.append("Check whether any of these are dangerous before confirming.")
 
     parts.append("")
     parts.append(
