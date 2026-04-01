@@ -150,10 +150,7 @@ class TestRd5Blunder:
         success_rate = successes / completed
         # Print results for manual inspection
         print(f"\n{'=' * 60}")
-        print(
-            f"Rd5 blunder avoidance: {successes}/{completed} "
-            f"({success_rate:.0%})"
-        )
+        print(f"Rd5 blunder avoidance: {successes}/{completed} ({success_rate:.0%})")
         print(f"{'=' * 60}")
         for r in results:
             print(
